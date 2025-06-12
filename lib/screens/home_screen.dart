@@ -1,15 +1,14 @@
 import 'package:flutter/material.dart';
 
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  const HomeScreen({Key? key, required this.changeIndex}) : super(key: key);
 
+  final Function(int) changeIndex;
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('YOLO Scanner'),
-      ),
+      appBar: AppBar(title: const Text('YOLO Scanner')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -29,7 +28,7 @@ class HomeScreen extends StatelessWidget {
             const SizedBox(height: 24),
             ElevatedButton(
               onPressed: () {
-                Navigator.pushNamed(context, '/scan');
+                changeIndex(1);
               },
               child: const Text('Go to Scan Page'),
             ),
@@ -103,7 +102,12 @@ class RecentScanTile extends StatelessWidget {
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListTile(
-        leading: Image.asset(imagePath, width: 50, height: 50, fit: BoxFit.cover),
+        leading: Image.asset(
+          imagePath,
+          width: 50,
+          height: 50,
+          fit: BoxFit.cover,
+        ),
         title: Text('Disease: ${labels.join(', ')}'),
         subtitle: Text('Confidence: $confidence%'),
       ),

@@ -1,15 +1,18 @@
 import 'dart:async';
 import 'dart:io';
-
+import 'dart:convert';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-
-import '../services/yolo_service.dart';
-import '../utils/detection_painter.dart';
-import '../utils/detection_utils.dart';
+import 'package:yolo_app/models/detection_result.dart';
+import 'package:yolo_app/services/api_service.dart';
+import 'package:yolo_app/models/scan_result.dart';
+import 'package:yolo_app/services/storage_service.dart';
 
 class ScanScreen extends StatefulWidget {
-  const ScanScreen({Key? key}) : super(key: key);
+  const ScanScreen({Key? key, required this.apiService}) : super(key: key);
+  final ApiService apiService;
 
   @override
   State<ScanScreen> createState() => _ScanScreenState();
@@ -19,40 +22,31 @@ class _ScanScreenState extends State<ScanScreen> {
   CameraController? _cameraController;
   late List<CameraDescription> _cameras;
   bool _isCameraInitialized = false;
-  XFile? _capturedImage;
-  bool _isReady = false;
-  bool _isProcessing = false;
-  late YOLOService _yoloService;
-  List<Map<String, dynamic>> _outputs = [];
-  String diseaseResult = '-';
+
+  bool isLoading = false;
+  XFile? capturedImage = null;
+  XFile? decodedImage = null;
+  List<DetectionItem> diseaseResult = [];
   double confidenceResult = 0.0;
-  Size? _originalImageSize;
 
   @override
   void initState() {
     super.initState();
-    _yoloService = YOLOService();
-    _initializeServices();
     _initializeCamera();
-  }
-
-  Future<void> _initializeServices() async {
-    await _yoloService.initialize();
-    setState(() => _isReady = true);
   }
 
   void _resetCameraPreview() {
     setState(() {
-      _capturedImage = null;
-      _outputs = [];
-      diseaseResult = '-';
+      capturedImage = null;
+      decodedImage = null;
+      diseaseResult = [];
       confidenceResult = 0.0;
     });
   }
 
   String get _buttonText {
-    if (_capturedImage != null) return 'Back to Camera';
-    return _isProcessing ? 'Processing...' : 'Capture and Predict';
+    if (decodedImage != null || capturedImage != null) return 'Back to Camera';
+    return 'Capture and Predict';
   }
 
   Future<void> _initializeCamera() async {
@@ -64,66 +58,88 @@ class _ScanScreenState extends State<ScanScreen> {
     });
   }
 
-  Future<void> _captureAndPredict() async {
-    if (_capturedImage != null) {
+  Future<XFile?> _decodeBase64Image(String base64String) async {
+    try {
+      // Decode base64 string
+      final bytes = base64Decode(base64String);
+
+      // Get temporary directory
+      final tempDir = await getTemporaryDirectory();
+      final file = File(
+        '${tempDir.path}/detected_image_${DateTime.now().millisecondsSinceEpoch}.jpg',
+      );
+
+      // Write the bytes to the file
+      await file.writeAsBytes(bytes);
+
+      // Create XFile from the saved file
+      return XFile(file.path);
+    } catch (e) {
+      print('Error decoding base64 image: $e');
+      return null;
+    }
+  }
+
+  Future<void> _captureAndPredict({bool usingCamera = true}) async {
+    if (capturedImage != null) {
       _resetCameraPreview();
       return;
     }
 
-    if (_isProcessing || !_isCameraInitialized) return;
+    if (isLoading || !_isCameraInitialized) return;
 
     setState(() {
-      _isProcessing = true;
+      isLoading = true;
     });
 
     try {
-      // 1. Capture image
-      final image = await _cameraController!.takePicture();
-      setState(() => _capturedImage = image);
+      XFile? image;
+      if (usingCamera) {
+        image = await _cameraController!.takePicture();
+      } else {
+        image = await ImagePicker().pickImage(source: ImageSource.gallery);
+      }
 
-      // 2. Process image and get detections
-      final result = await _yoloService.detectObjects(image.path);
+      if (image == null) {
+        return;
+      }
 
       setState(() {
-        _outputs = result.detections;
-        _originalImageSize = result.imageSize;
-        _isProcessing = false;
+        capturedImage = image;
+      });
 
-        // Update results display
-        final bestDetection = DetectionUtils.getHighestConfidenceDetection(
-          _outputs,
-          _yoloService.confidenceThreshold,
-        );
-        if (bestDetection != null) {
-          diseaseResult = _yoloService.labels[bestDetection['classId']];
-          confidenceResult = (bestDetection['confidence'] * 100);
+      final result = await widget.apiService.detectObjects(image.path);
+      final decodedResultImage = await _decodeBase64Image(result.resultImage);
+
+      // Parse detections
+      final detections = result.detections;
+
+      // Save to storage
+      final scanResult = ScanResult.create(
+        detections: detections,
+        originalImagePath: image.path,
+        resultImagePath: decodedResultImage?.path,
+      );
+
+      await StorageService.saveScanResult(scanResult);
+
+      setState(() {
+        diseaseResult = detections;
+        if (decodedResultImage != null) {
+          decodedImage = decodedResultImage;
         }
+        isLoading = false;
       });
     } catch (e) {
       print('Error during capture: $e');
-      setState(() => _isProcessing = false);
+      setState(() => isLoading = false);
     }
   }
 
   @override
   void dispose() {
     _cameraController?.dispose();
-    _yoloService.dispose();
     super.dispose();
-  }
-
-  Widget _renderDetectionResults() {
-    if (_capturedImage == null || _originalImageSize == null)
-      return Container();
-
-    return DetectionPainter.renderBoxes(
-      context: context,
-      imageSize: _originalImageSize!,
-      detections: _outputs,
-      labels: _yoloService.labels,
-      confidenceThreshold: _yoloService.confidenceThreshold,
-      detectAll: false,
-    );
   }
 
   @override
@@ -134,69 +150,83 @@ class _ScanScreenState extends State<ScanScreen> {
         children: [
           Expanded(
             child:
-                _isCameraInitialized && _isReady
+                _isCameraInitialized
                     ? Stack(
                       children: [
                         SizedBox(
                           width: MediaQuery.of(context).size.width,
                           height: MediaQuery.of(context).size.height,
                           child:
-                              _capturedImage == null
-                                  ? CameraPreview(_cameraController!)
-                                  : Center(
-                                    child: Image.file(
-                                      File(_capturedImage!.path),
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
+                              decodedImage != null
+                                  ? Image.file(
+                                    File(decodedImage!.path),
+                                    fit: BoxFit.cover,
+                                  )
+                                  : capturedImage != null
+                                  ? Image.file(
+                                    File(capturedImage!.path),
+                                    fit: BoxFit.cover,
+                                  )
+                                  : CameraPreview(_cameraController!),
                         ),
-                        if (_capturedImage != null)
-                          Positioned.fill(
-                            child: Image.file(
-                              File(_capturedImage!.path),
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                        _renderDetectionResults(),
                       ],
                     )
                     : const Center(child: CircularProgressIndicator()),
           ),
           Padding(
             padding: const EdgeInsets.all(16.0),
-            child: ElevatedButton(
-              onPressed: _isCameraInitialized ? _captureAndPredict : null,
-              child:
-                  _isProcessing
-                      ? SizedBox(
-                        height: 24,
-                        width: 24,
-                        child: const CircularProgressIndicator(),
-                      )
-                      : Text(_buttonText),
-            ),
+            child:
+                isLoading
+                    ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      child: const CircularProgressIndicator(),
+                    )
+                    : Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ElevatedButton(
+                          onPressed:
+                              _isCameraInitialized ? _captureAndPredict : null,
+                          child: Text(_buttonText),
+                        ),
+                        const SizedBox(width: 12),
+                        ElevatedButton(
+                          onPressed:
+                              _isCameraInitialized
+                                  ? () => _captureAndPredict(usingCamera: false)
+                                  : null,
+                          child: Icon(Icons.photo_rounded),
+                        ),
+                      ],
+                    ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16.0),
-            decoration: BoxDecoration(
-              color: Colors.grey[200],
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(16),
+          if (diseaseResult.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16.0),
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(16),
+                ),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Prediction Results',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Disease: ${diseaseResult.map((e) => "${e.className} (${e.confidence.toStringAsFixed(2)}%)").join(', ')}',
+                  ),
+                  if (confidenceResult != 0.0)
+                    Text('Confidence: ${confidenceResult.toStringAsFixed(2)}%'),
+                ],
               ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Prediction Results',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                Text('Disease: $diseaseResult'),
-                Text('Confidence: ${confidenceResult.toStringAsFixed(2)}%'),
-              ],
-            ),
-          ),
         ],
       ),
     );

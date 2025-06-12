@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:yolo_app/services/api_service.dart';
+import 'package:yolo_app/services/storage_service.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/label_info_screen.dart';
 import 'screens/scan_screen.dart';
+import 'screens/history_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Hive storage
+  await StorageService.init();
 
   runApp(const MyApp());
 }
@@ -37,17 +43,25 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
-  final List<Widget> _screens = [
-    const HomeScreen(),
-    const ScanScreen(),
-    const LabelInfoScreen(),
-  ];
+  void changeIndex(int index) {
+    setState(() {
+      _currentIndex = index;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
+    final List<Widget> _screens = [
+      HomeScreen(changeIndex: changeIndex),
+      ScanScreen(apiService: ApiService()),
+      const HistoryScreen(),
+      const LabelInfoScreen(),
+    ];
+
     return Scaffold(
-      body: _screens[_currentIndex],
+      body: IndexedStack(index: _currentIndex, children: _screens),
       bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
         currentIndex: _currentIndex,
         onTap: (index) {
           setState(() {
@@ -60,6 +74,7 @@ class _MainScreenState extends State<MainScreen> {
             label: 'Dashboard',
           ),
           BottomNavigationBarItem(icon: Icon(Icons.camera_alt), label: 'Scan'),
+          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
           BottomNavigationBarItem(icon: Icon(Icons.info), label: 'Info'),
         ],
       ),
